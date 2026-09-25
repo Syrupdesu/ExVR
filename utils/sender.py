@@ -39,10 +39,26 @@ def pack_data(data, default_data):
 hmd_data_prev=None
 hmd_data_curr=None
 def pack_hmd_data(data, default):
+    """Pack ExVR head pose for the upstream VRto3D OpenTrack receiver.
+
+    The old ExVR VirtualHMD fork accepted 7 doubles:
+        X Y Z + quaternion W X Y Z
+
+    Upstream VRto3D accepts the standard OpenTrack packet:
+        X Y Z + Yaw Pitch Roll
+    where all six values are little-endian doubles and position is in cm.
+
+    Preserve the old fork's final SteamVR pose by converting ExVR's
+    quaternion to the XYZ Euler convention used by upstream VRto3D,
+    then applying the corresponding coordinate-system conversion.
+    """
     global hmd_data_prev, hmd_data_curr
     rot = [get_value(a, b) for a, b in zip(data["Rotation"], default["Rotation"])]
     pos = [get_value(a, b) for a, b in zip(data["Position"], default["Position"])]
-    qx, qy, qz, qw = R.from_euler('xzy', [rot[1], rot[2], -rot[0]], degrees=True).as_quat()
+    # This is the exact orientation that the old VirtualHMD fork put into
+    # DriverPose_t. Keep it as a quaternion before converting to the Euler
+    # representation expected by upstream VRto3D.
+    old_rotation = R.from_euler('xzy', [rot[1], rot[2], -rot[0]], degrees=True)
     if hmd_data_prev is None:
         hmd_data_prev = hmd_data_curr = pos
     delta = R.from_euler(
@@ -50,8 +66,36 @@ def pack_hmd_data(data, default):
     ).apply([p - q for p, q in zip(pos, hmd_data_prev)])
     hmd_data_curr = [c + d for c, d in zip(hmd_data_curr, delta)]
     hmd_data_prev = pos
-    return struct.pack("7d", *hmd_data_curr, qw, qx, qy, qz)
 
+    # Upstream VRto3D reconstructs the pose as:
+    #   HmdQuaternion_FromEulerAngles(Roll, Pitch, -Yaw)
+    # which uses the XYZ Euler convention. Convert the old quaternion into
+    # that exact convention, then invert the final Z angle for OpenTrack's
+    # Yaw field.
+    roll_xyz, pitch_xyz, z_xyz = old_rotation.as_euler('xyz', degrees=True)
+    open_track_yaw = -z_xyz
+    open_track_pitch = pitch_xyz
+    open_track_roll = roll_xyz
+
+    # Old fork -> SteamVR position:
+    #   VR X = pX / 100, VR Y = pZ / 100, VR Z = pY / 100
+    # Upstream OpenTrack -> SteamVR position:
+    #   VR X = -X / 100, VR Y = -Y / 100, VR Z = Z / 100
+    # Therefore send X=-pX, Y=-pZ, Z=pY.
+    open_track_pos = (
+        -hmd_data_curr[0],
+        -hmd_data_curr[2],
+        hmd_data_curr[1],
+    )
+
+    # OpenTrack's UDP protocol is six little-endian doubles.
+    return struct.pack(
+        "<6d",
+        *open_track_pos,
+        open_track_yaw,
+        open_track_pitch,
+        open_track_roll,
+    )
 def calculate_endpoint(start_point, length, euler_angles):
     rotation = R.from_euler('xyz', euler_angles, degrees=True)
     direction_vector = np.array([0, 0, -length])
