@@ -4,8 +4,10 @@ from utils.actions import *
 from utils.json_manager import load_json
 import screeninfo
 import os
+import sys
 import psutil
-import win32gui, win32process
+if sys.platform == "win32":
+    import win32gui, win32process
 
 mouse_listener = None
 monitor = None
@@ -224,6 +226,10 @@ def stop_hotkeys():
 
 # check title first then program name
 def is_in_game():
+    if sys.platform != "win32":
+        # TODO: Linux foreground-window detection (X11/Wayland) is not
+        # implemented yet; only_ingame is effectively disabled on Linux.
+        return True
     hwnd = win32gui.GetForegroundWindow()
     title = win32gui.GetWindowText(hwnd)
 

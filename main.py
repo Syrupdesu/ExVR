@@ -1,9 +1,10 @@
 import sys
 import onnxruntime as _onnxruntime_preload
-import pyuac
-if not pyuac.isUserAdmin():
-    pyuac.runAsAdmin()
-    sys.exit(0)
+if sys.platform == "win32":
+    import pyuac
+    if not pyuac.isUserAdmin():
+        pyuac.runAsAdmin()
+        sys.exit(0)
 from PyQt5.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -24,7 +25,10 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from PyQt5.QtGui import QImage, QPixmap, QDoubleValidator
-import filecmp, os, winreg, shutil
+import filecmp, os, shutil
+if sys.platform == "win32":
+    import winreg
+    from ctypes import windll
 import cv2
 import utils.tracking
 from utils.actions import *
@@ -36,7 +40,6 @@ from tracker.face.face import draw_face_landmarks
 from tracker.face.tongue import draw_tongue_position
 from tracker.hand.hand import draw_hand_landmarks
 
-from ctypes import windll
 from cv2_enumerate_cameras import enumerate_cameras
 from tracker.controller.controller import *
 import warnings
@@ -157,7 +160,6 @@ class VideoCaptureThread(QThread):
     def cleanup(self):
         if self.video_capture:
             self.video_capture.release()
-            cv2.destroyAllWindows()
 
 class VideoWindow(QMainWindow):
     def __init__(self):
@@ -911,6 +913,10 @@ class VideoWindow(QMainWindow):
         return True
 
     def sync_installed_components(self, steamvr_driver_path, vrcfacetracking_path):
+        if sys.platform != "win32":
+            # On Linux the official VRto3D and the standalone VMT driver are
+            # maintained by the user; ExVR must not overwrite them.
+            return {"updated": [], "error": None}
         if steamvr_driver_path is None:
             return {"updated": [], "error": None}
 
@@ -939,6 +945,8 @@ class VideoWindow(QMainWindow):
         return {"updated": updated, "error": None}
 
     def install_checking(self):
+        if sys.platform != "win32":
+            return self.install_checking_linux()
         # Open registry key to get Steam installation path
         try:
             with winreg.OpenKey(
@@ -985,6 +993,40 @@ class VideoWindow(QMainWindow):
             print(f"Error accessing registry or file system: {e}")
             return False, None, None, None
 
+    def linux_steam_root(self):
+        home = os.path.expanduser("~")
+        candidates = [
+            os.path.join(home, ".local", "share", "Steam"),
+            os.path.join(home, ".steam", "steam"),
+            os.path.join(home, ".var", "app", "com.valvesoftware.Steam", "data", "Steam"),
+        ]
+        for path in candidates:
+            if os.path.isdir(path):
+                return path
+        return None
+
+    def install_checking_linux(self):
+        # On Linux, VRto3D and VMT drivers are installed and registered
+        # separately (vrto3d install.sh / vrpathreg). ExVR only reports
+        # whether SteamVR itself is present and never manages drivers.
+        try:
+            steam_path = self.linux_steam_root()
+            if steam_path is None:
+                return False, None, None, None
+
+            steamvr_driver_path = os.path.join(
+                steam_path, "steamapps", "common", "SteamVR", "drivers"
+            )
+            check_steamvr_path = os.path.join(
+                steam_path, "steamapps", "common", "SteamVR", "bin"
+            )
+            if not os.path.exists(check_steamvr_path):
+                check_steamvr_path = None
+            return False, steamvr_driver_path, None, check_steamvr_path
+        except Exception as e:
+            print(f"Error locating SteamVR: {e}")
+            return False, None, None, None
+
     def populate_priority_list(self):
         for priority_key, label in PROCESS_PRIORITY_OPTIONS:
             self.priority_selection.addItem(tr(label), priority_key)
@@ -1007,10 +1049,31 @@ class VideoWindow(QMainWindow):
             "HIGH_PRIORITY_CLASS": 0x00000080,
             "REALTIME_PRIORITY_CLASS": 0x00000100
         }
-        # Check if the index is valid
         if priority_key not in priority_classes:
             self.display_message("Error","Invalid priority index")
             return False
+        if sys.platform != "win32":
+            # Windows priority classes mapped to Linux nice values.
+            nice_values = {
+                "IDLE_PRIORITY_CLASS": 19,
+                "BELOW_NORMAL_PRIORITY_CLASS": 10,
+                "NORMAL_PRIORITY_CLASS": 0,
+                "ABOVE_NORMAL_PRIORITY_CLASS": -5,
+                "HIGH_PRIORITY_CLASS": -10,
+                "REALTIME_PRIORITY_CLASS": -20,
+            }
+            try:
+                os.setpriority(os.PRIO_PROCESS, 0, nice_values[priority_key])
+            except (PermissionError, OSError) as exc:
+                print(f"Could not set priority {priority_key}: {exc}")
+                self.display_message(
+                    "Error",
+                    "Setting this priority requires privileges "
+                    "(negative nice values need CAP_SYS_NICE or root).",
+                )
+                return False
+            g.config["Setting"]["priority"] = priority_key
+            return True
         priority_class = priority_classes[priority_key]
         current_pid = os.getpid()  # Get the current process ID
         handle = windll.kernel32.OpenProcess(0x0200 | 0x0400, False, current_pid)  # Open the current process
@@ -1040,6 +1103,13 @@ class VideoWindow(QMainWindow):
         return
 
     def install_function(self):
+        if sys.platform != "win32":
+            self.display_message(
+                "Error",
+                "On Linux, install the upstream VRto3D driver (vrto3d install.sh) "
+                "and the VMT driver (vrpathreg) separately. ExVR does not manage them.",
+            )
+            return
         try:
             self.install_state, steamvr_driver_path, vrcfacetracking_path, check_steamvr_path = (
                 self.install_checking()
@@ -1165,11 +1235,12 @@ class VideoWindow(QMainWindow):
 
     def get_camera_source(self, selected_camera_name):
         devices = enumerate_cameras(cv2.CAP_ANY)
-        for device in devices:
-            if device.index > 1000:
-                device.name += " (MSMF)"
-            else:
-                device.name += " (DSHOW)"
+        if sys.platform == "win32":
+            for device in devices:
+                if device.index > 1000:
+                    device.name += " (MSMF)"
+                else:
+                    device.name += " (DSHOW)"
         for device in devices:
             if device.name == selected_camera_name:
                 return device.index
@@ -1191,16 +1262,18 @@ class VideoWindow(QMainWindow):
 
     def populate_camera_list(self):
         devices = enumerate_cameras(cv2.CAP_ANY)
-        dshow_devices = []
-        msmf_devices = []
+        if sys.platform == "win32":
+            dshow_devices = []
+            msmf_devices = []
+            for device in devices:
+                if device.index > 1000:
+                    device.name += " (MSMF)"
+                    msmf_devices.append(device)
+                else:
+                    device.name += " (DSHOW)"
+                    dshow_devices.append(device)
+            devices = dshow_devices + msmf_devices
         for device in devices:
-            if device.index > 1000:
-                device.name += " (MSMF)"
-                msmf_devices.append(device)
-            else:
-                device.name += " (DSHOW)"
-                dshow_devices.append(device)
-        for device in dshow_devices + msmf_devices:
             self.camera_selection.addItem(device.name)
 
     def populate_camera_performance_list(self):
