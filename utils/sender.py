@@ -48,9 +48,15 @@ def pack_hmd_data(data, default):
         X Y Z + Yaw Pitch Roll
     where all six values are little-endian doubles and position is in cm.
 
-    Preserve the old fork's final SteamVR pose by converting ExVR's
-    quaternion to the XYZ Euler convention used by upstream VRto3D,
-    then applying the corresponding coordinate-system conversion.
+    Upstream rebuilds the orientation in OpenTrackThread as
+        HmdQuaternion_FromEulerAngles(Roll, Pitch, -Yaw)
+    and that function (utils/vrmath/vrmath.h) matches scipy's 'zxy'
+    extrinsic convention: R = Ry(yaw) @ Rx(pitch) @ Rz(roll).
+    Decompose the old fork's quaternion in that exact convention and
+    negate the third angle for OpenTrack's Yaw field.
+
+    Preserve the old fork's final SteamVR pose by applying the
+    corresponding coordinate-system conversion for position as well.
     """
     global hmd_data_prev, hmd_data_curr
     rot = [get_value(a, b) for a, b in zip(data["Rotation"], default["Rotation"])]
@@ -69,13 +75,14 @@ def pack_hmd_data(data, default):
 
     # Upstream VRto3D reconstructs the pose as:
     #   HmdQuaternion_FromEulerAngles(Roll, Pitch, -Yaw)
-    # which uses the XYZ Euler convention. Convert the old quaternion into
-    # that exact convention, then invert the final Z angle for OpenTrack's
-    # Yaw field.
-    roll_xyz, pitch_xyz, z_xyz = old_rotation.as_euler('xyz', degrees=True)
-    open_track_yaw = -z_xyz
-    open_track_pitch = pitch_xyz
-    open_track_roll = roll_xyz
+    # which uses the 'zxy' extrinsic convention (R = Ry @ Rx @ Rz, angles
+    # ordered z, x, y — exactly the packet's Roll, Pitch, Yaw fields).
+    # Decompose the old quaternion into that convention and negate the
+    # final angle for OpenTrack's Yaw field.
+    roll_zxy, pitch_zxy, yaw_zxy = old_rotation.as_euler('zxy')
+    open_track_yaw = -yaw_zxy
+    open_track_pitch = pitch_zxy
+    open_track_roll = roll_zxy
 
     # Old fork -> SteamVR position:
     #   VR X = pX / 100, VR Y = pZ / 100, VR Z = pY / 100
@@ -88,13 +95,12 @@ def pack_hmd_data(data, default):
         hmd_data_curr[1],
     )
 
-    # OpenTrack's UDP protocol is six little-endian doubles.
+    # OpenTrack's UDP protocol is six little-endian doubles; angles in
+    # degrees (upstream applies DEG_TO_RAD when it reconstructs the pose).
     return struct.pack(
         "<6d",
         *open_track_pos,
-        open_track_yaw,
-        open_track_pitch,
-        open_track_roll,
+        *(np.degrees(angle) for angle in (open_track_yaw, open_track_pitch, open_track_roll)),
     )
 def calculate_endpoint(start_point, length, euler_angles):
     rotation = R.from_euler('xyz', euler_angles, degrees=True)
