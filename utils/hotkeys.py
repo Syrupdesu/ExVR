@@ -19,6 +19,7 @@ monitor = None
 _kb_listener = None
 _kb_chords = []  # [(key-name tuple, callback or (press, release) pair)]
 _kb_held = []    # currently held key names in press order
+_kb_active_tuples = []  # chords whose press callback fired, awaiting release
 
 _PYNPUT_SPECIAL = {
     pynput_keyboard.Key.up: "up",
@@ -167,6 +168,8 @@ def _on_kb_press(key):
             try:
                 if isinstance(cb, tuple):
                     cb[0](None)
+                    if chord not in _kb_active_tuples:
+                        _kb_active_tuples.append(chord)
                 else:
                     cb()
             except Exception as exc:
@@ -178,12 +181,19 @@ def _on_kb_release(key):
         return
     while name in _kb_held:
         _kb_held.remove(name)
-    for chord, cb in _kb_chords:
-        if isinstance(cb, tuple) and len(chord) == 1 and chord[0] == name:
-            try:
-                cb[1](None)
-            except Exception as exc:
-                print(f"hotkey action error: {exc}")
+    # fire the release callback of any (press, release) chord that is no
+    # longer fully held, so multi-key bindings can't leave input stuck down
+    for chord in list(_kb_active_tuples):
+        if all(part in _kb_held for part in chord):
+            continue
+        _kb_active_tuples.remove(chord)
+        for registered, cb in _kb_chords:
+            if registered == chord and isinstance(cb, tuple):
+                try:
+                    cb[1](None)
+                except Exception as exc:
+                    print(f"hotkey action error: {exc}")
+                break
 
 def start_keyboard_listener():
     global _kb_listener
@@ -205,6 +215,7 @@ def stop_keyboard_listener():
             print(f"keyboard listener stop warning: {exc}")
         _kb_listener = None
     _kb_held.clear()
+    _kb_active_tuples.clear()
 
 def apply_hotkeys():
     global mouse_listener
