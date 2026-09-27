@@ -1009,7 +1009,8 @@ class VideoWindow(QMainWindow):
         candidates = [
             os.path.join(home, ".local", "share", "Steam"),
             os.path.join(home, ".steam", "steam"),
-            os.path.join(home, ".var", "app", "com.valvesoftware.Steam", "data", "Steam"),
+            os.path.join(home, ".var", "app", "com.valvesoftware.Steam",
+                         ".local", "share", "Steam"),
         ]
         for path in candidates:
             if os.path.isdir(path):
